@@ -1,5 +1,5 @@
-import { Anthropic } from "@anthropic-ai/sdk";
-import { MessageParam, Tool } from "@anthropic-ai/sdk/resources/messages/messages.mjs";
+import { OpenAI } from "openai";
+import type { ChatCompletionTool, ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import readline from "readline/promises";
@@ -7,22 +7,25 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-if (!ANTHROPIC_API_KEY) {
-  throw new Error("ANTHROPIC_API_KEY is not set");
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const CHAT_MODEL = "google/gemini-2.0-flash-001";
+
+if (!OPENAI_API_KEY) {
+  throw new Error("OPENAI_API_KEY is not set");
 }
 
 class MCPClient {
   private mcp: Client;
-  private anthropic: Anthropic;
+  private openai: OpenAI;
   private transport: StdioClientTransport | null = null;
-  private tools: Tool[] = [];
+  private tools: ChatCompletionTool[] = [];
 
   constructor() {
-    this.anthropic = new Anthropic({
-      apiKey: ANTHROPIC_API_KEY,
+    this.openai = new OpenAI({
+      baseURL: 'https://openrouter.ai/api/v1',
+      apiKey: OPENAI_API_KEY,
     });
-    this.mcp = new Client({ name: "mcp-client-cli", version: "1.0.0" });
+    this.mcp = new Client({ name: "tiny-mcp-client", version: "1.0.0" });
   }
 
   // methods will go here
@@ -51,16 +54,17 @@ class MCPClient {
 
       // client 1:1 server
       const toolsResult = await this.mcp.listTools();
-      this.tools = toolsResult.tools.map((tool) => {
-        return {
+      this.tools = toolsResult.tools.map((tool) => ({
+        type: "function",
+        function: {
           name: tool.name,
           description: tool.description,
-          input_schema: tool.inputSchema,
-        };
-      });
+          parameters: tool.inputSchema,
+        },
+      }));
       console.log(
         "Connected to server with tools:",
-        this.tools.map(({ name }) => name)
+        this.tools.map(({ function: { name } }) => name)
       );
     } catch (e) {
       console.log("Failed to connect to MCP server: ", e);
@@ -69,53 +73,59 @@ class MCPClient {
   }
 
   async processQuery(query: string) {
-    const messages: MessageParam[] = [
+    const messages: ChatCompletionMessageParam[] = [
       {
         role: "user",
         content: query,
       },
     ];
 
-    const response = await this.anthropic.messages.create({
-      model: "claude-3-5-sonnet-20241022",
-      max_tokens: 1000,
+    const response = await this.openai.chat.completions.create({
+      model: CHAT_MODEL,
       messages,
       tools: this.tools,
+      max_tokens: 5000,
     });
 
     const finalText: string[] = [];
     const toolResults: any[] = [];
 
-    for (const content of response.content) {
-      if (content.type === "text") {
-        finalText.push(content.text);
-      } else if (content.type === "tool_use") {
-        const toolName = content.name;
-        const toolArgs = content.input as { [x: string]: unknown } | undefined;
+    for (const choice of response.choices) {
+      const message = choice.message;
 
-        const result = await this.mcp.callTool({
-          name: toolName,
-          arguments: toolArgs,
-        });
-        toolResults.push(result);
-        finalText.push(
-          `[Calling tool ${toolName} with args ${JSON.stringify(toolArgs)}]`
-        );
+      if (message.content) {
+        finalText.push(message.content);
+      }
 
-        messages.push({
-          role: "user",
-          content: result.content as string,
-        });
+      if (message.tool_calls) {
+        for (const toolCall of message.tool_calls) {
+          const toolName = toolCall.function.name;
+          const toolArgs = JSON.parse(toolCall.function.arguments);
 
-        const response = await this.anthropic.messages.create({
-          model: "claude-3-5-sonnet-20241022",
-          max_tokens: 1000,
-          messages,
-        });
+          const result = await this.mcp.callTool({
+            name: toolName,
+            arguments: toolArgs,
+          });
+          toolResults.push(result);
+          finalText.push(
+            `[Calling tool ${toolName} with args ${JSON.stringify(toolArgs)}]`
+          );
 
-        finalText.push(
-          response.content[0].type === "text" ? response.content[0].text : ""
-        );
+          messages.push({
+            role: "assistant",
+            content: result.content as string,
+          });
+
+          const followUpResponse = await this.openai.chat.completions.create({
+            model: CHAT_MODEL,
+            messages,
+            max_tokens: 5000,
+          });
+
+          if (followUpResponse.choices[0].message.content) {
+            finalText.push(followUpResponse.choices[0].message.content);
+          }
+        }
       }
     }
 
@@ -148,8 +158,6 @@ class MCPClient {
   async cleanup() {
     await this.mcp.close();
   }
-
-
 }
 
 async function main() {
