@@ -4,6 +4,7 @@
   "description": "",
   "type": "module",
   "scripts": {
+    "start": "node build/index.js servers/findrepo/index.js",
     "build": "tsc && chmod 755 build/index.js"
   },
   "keywords": [],
@@ -12,7 +13,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.7.0",
     "dotenv": "^16.4.7",
-    "openai": "^4.89.0"
+    "openai": "^4.89.0",
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/node": "^20",
